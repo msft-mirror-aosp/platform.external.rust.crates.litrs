@@ -39,6 +39,53 @@ pub(crate) fn assert_parse_ok_eq<T: PartialEq + Debug + Display>(
     }
 }
 
+// This is not ideal, but to perform this check we need `proc-macro2`. So we
+// just don't do anything if that feature is not enabled.
+#[cfg(not(feature = "proc-macro2"))]
+pub(crate) fn assert_roundtrip<T>(_: T, _: &str) {}
+
+#[cfg(feature = "proc-macro2")]
+#[track_caller]
+pub(crate) fn assert_roundtrip<T>(ours: T, input: &str)
+where
+    T: std::convert::TryFrom<proc_macro2::Literal> + fmt::Debug + PartialEq + Clone,
+    proc_macro2::Literal: From<T>,
+    <T as std::convert::TryFrom<proc_macro2::Literal>>::Error: std::fmt::Display,
+{
+    let pm_lit = input.parse::<proc_macro2::Literal>()
+        .expect("failed to parse input as proc_macro2::Literal");
+    let t_name = std::any::type_name::<T>();
+
+    // Unfortunately, `proc_macro2::Literal` does not implement `PartialEq`, so
+    // this is the next best thing.
+    if proc_macro2::Literal::from(ours.clone()).to_string() != pm_lit.to_string() {
+        panic!(
+            "Converting {} to proc_macro2::Literal has unexpected result:\
+                \nconverted: {:?}\nexpected:  {:?}",
+            t_name,
+            proc_macro2::Literal::from(ours),
+            pm_lit,
+        );
+    }
+
+    match T::try_from(pm_lit) {
+        Err(e) => {
+            panic!("Trying to convert proc_macro2::Literal to {} results in error: {}", t_name, e);
+        }
+        Ok(res) => {
+            if res != ours {
+                panic!(
+                    "Converting proc_macro2::Literal to {} has unexpected result:\
+                        \nactual:    {:?}\nexpected:  {:?}",
+                    t_name,
+                    res,
+                    ours,
+                );
+            }
+        }
+    }
+}
+
 macro_rules! assert_err {
     ($ty:ident, $input:literal, $kind:ident, $( $span:tt )+ ) => {
         assert_err_single!($ty::parse($input), $kind, $($span)+);

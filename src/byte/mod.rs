@@ -29,7 +29,8 @@ impl<B: Buffer> ByteLit<B> {
             return Err(perr(None, InvalidByteLiteralStart));
         }
 
-        Self::parse_impl(input)
+        let value = parse_impl(&input)?;
+        Ok(Self { raw: input, value })
     }
 
     /// Returns the byte value that this literal represents.
@@ -37,37 +38,16 @@ impl<B: Buffer> ByteLit<B> {
         self.value
     }
 
-    /// Precondition: must start with `b'`.
-    pub(crate) fn parse_impl(input: B) -> Result<Self, ParseError> {
-        if input.len() == 2 {
-            return Err(perr(None, UnterminatedByteLiteral));
-        }
-        if *input.as_bytes().last().unwrap() != b'\'' {
-            return Err(perr(None, UnterminatedByteLiteral));
-        }
-
-        let inner = &input[2..input.len() - 1];
-        let first = inner.as_bytes().get(0).ok_or(perr(None, EmptyByteLiteral))?;
-        let (c, len) = match first {
-            b'\'' => return Err(perr(2, UnescapedSingleQuote)),
-            b'\n' | b'\t' | b'\r'
-                => return Err(perr(2, UnescapedSpecialWhitespace)),
-
-            b'\\' => unescape::<u8>(inner, 2)?,
-            other if other.is_ascii() => (*other, 1),
-            _ => return Err(perr(2, NonAsciiInByteLiteral)),
-        };
-        let rest = &inner[len..];
-
-        if !rest.is_empty() {
-            return Err(perr(len + 2..input.len() - 1, OverlongByteLiteral));
-        }
-
-        Ok(Self {
-            raw: input,
-            value: c,
-        })
+    /// Returns the raw input that was passed to `parse`.
+    pub fn raw_input(&self) -> &str {
+        &self.raw
     }
+
+    /// Returns the raw input that was passed to `parse`, potentially owned.
+    pub fn into_raw_input(self) -> B {
+        self.raw
+    }
+
 }
 
 impl ByteLit<&str> {
@@ -85,6 +65,36 @@ impl<B: Buffer> fmt::Display for ByteLit<B> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.pad(&self.raw)
     }
+}
+
+/// Precondition: must start with `b'`.
+#[inline(never)]
+pub(crate) fn parse_impl(input: &str) -> Result<u8, ParseError> {
+    if input.len() == 2 {
+        return Err(perr(None, UnterminatedByteLiteral));
+    }
+    if *input.as_bytes().last().unwrap() != b'\'' {
+        return Err(perr(None, UnterminatedByteLiteral));
+    }
+
+    let inner = &input[2..input.len() - 1];
+    let first = inner.as_bytes().get(0).ok_or(perr(None, EmptyByteLiteral))?;
+    let (c, len) = match first {
+        b'\'' => return Err(perr(2, UnescapedSingleQuote)),
+        b'\n' | b'\t' | b'\r'
+            => return Err(perr(2, UnescapedSpecialWhitespace)),
+
+        b'\\' => unescape::<u8>(inner, 2)?,
+        other if other.is_ascii() => (*other, 1),
+        _ => return Err(perr(2, NonAsciiInByteLiteral)),
+    };
+    let rest = &inner[len..];
+
+    if !rest.is_empty() {
+        return Err(perr(len + 2..input.len() - 1, OverlongByteLiteral));
+    }
+
+    Ok(c)
 }
 
 #[cfg(test)]
