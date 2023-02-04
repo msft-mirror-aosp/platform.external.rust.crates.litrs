@@ -1,6 +1,6 @@
 use crate::{
     Literal, ParseError,
-    test_util::assert_parse_ok_eq,
+    test_util::{assert_parse_ok_eq, assert_roundtrip},
 };
 use super::{FloatLit, FloatType};
 
@@ -16,9 +16,10 @@ macro_rules! check {
     ($intpart:literal $fracpart:literal $exppart:literal $suffix:tt) => {
         let input = concat!($intpart, $fracpart, $exppart, check!(@stringify_suffix $suffix));
         let expected_float = FloatLit {
-            number_part: concat!($intpart, $fracpart, $exppart),
+            raw: input,
             end_integer_part: $intpart.len(),
             end_fractional_part: $intpart.len() + $fracpart.len(),
+            end_number_part: $intpart.len() + $fracpart.len() + $exppart.len(),
             type_suffix: check!(@ty $suffix),
         };
 
@@ -26,7 +27,7 @@ macro_rules! check {
             input, FloatLit::parse(input), expected_float.clone(), "FloatLit::parse");
         assert_parse_ok_eq(
             input, Literal::parse(input), Literal::Float(expected_float), "Literal::parse");
-
+        assert_roundtrip(expected_float.to_owned(), input);
     };
     (@ty f32) => { Some(FloatType::F32) };
     (@ty f64) => { Some(FloatType::F64) };

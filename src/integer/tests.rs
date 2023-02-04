@@ -1,7 +1,7 @@
 use std::fmt::{Debug, Display};
 use crate::{
     FromIntegerLiteral, Literal, IntegerLit, IntegerType as Ty, IntegerBase, IntegerBase::*,
-    test_util::assert_parse_ok_eq,
+    test_util::{assert_parse_ok_eq, assert_roundtrip},
 };
 
 
@@ -15,11 +15,18 @@ fn check<T: FromIntegerLiteral + PartialEq + Debug + Display>(
     main_part: &str,
     type_suffix: Option<Ty>,
 ) {
-    let expected_integer = IntegerLit { base, main_part, type_suffix };
+    let expected_integer = IntegerLit {
+        raw: input,
+        start_main_part: base.prefix().len(),
+        end_main_part: base.prefix().len() + main_part.len(),
+        base,
+        type_suffix
+    };
     assert_parse_ok_eq(
         input, IntegerLit::parse(input), expected_integer.clone(), "IntegerLit::parse");
     assert_parse_ok_eq(
         input, Literal::parse(input), Literal::Integer(expected_integer), "Literal::parse");
+    assert_roundtrip(expected_integer.to_owned(), input);
 
     let actual_value = IntegerLit::parse(input)
         .unwrap()
