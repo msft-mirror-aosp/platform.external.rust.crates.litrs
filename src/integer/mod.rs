@@ -25,8 +25,12 @@ use crate::{
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct IntegerLit<B: Buffer> {
+    raw: B,
+    // First index of the main number part (after the base prefix).
+    start_main_part: usize,
+    // First index not part of the main number part.
+    end_main_part: usize,
     base: IntegerBase,
-    main_part: B,
     type_suffix: Option<IntegerType>,
 }
 
@@ -74,7 +78,24 @@ impl<B: Buffer> IntegerLit<B> {
     /// invalid or represents a different kind of literal.
     pub fn parse(input: B) -> Result<Self, ParseError> {
         match first_byte_or_empty(&input)? {
-            digit @ b'0'..=b'9' => Self::parse_impl(input, digit),
+            digit @ b'0'..=b'9' => {
+                // TODO: simplify once RFC 2528 is stabilized
+                let IntegerLit {
+                    start_main_part,
+                    end_main_part,
+                    base,
+                    type_suffix,
+                    ..
+                } =  parse_impl(&input, digit)?;
+
+                Ok(Self {
+                    raw: input,
+                    start_main_part,
+                    end_main_part,
+                    base,
+                    type_suffix,
+                })
+            },
             _ => Err(perr(0, DoesNotStartWithDigit)),
         }
     }
@@ -93,7 +114,7 @@ impl<B: Buffer> IntegerLit<B> {
         };
 
         let mut acc = N::from_small_number(0);
-        for digit in self.main_part.bytes() {
+        for digit in self.raw_main_part().bytes() {
             if digit == b'_' {
                 continue;
             }
@@ -118,7 +139,7 @@ impl<B: Buffer> IntegerLit<B> {
     /// The main part containing the digits and potentially `_`. Do not try to
     /// parse this directly as that would ignore the base!
     pub fn raw_main_part(&self) -> &str {
-        &self.main_part
+        &(*self.raw)[self.start_main_part..self.end_main_part]
     }
 
     /// The type suffix, if specified.
@@ -126,73 +147,14 @@ impl<B: Buffer> IntegerLit<B> {
         self.type_suffix
     }
 
-    /// Precondition: first byte of string has to be in `b'0'..=b'9'`.
-    pub(crate) fn parse_impl(input: B, first: u8) -> Result<Self, ParseError> {
-        // Figure out base and strip prefix base, if it exists.
-        let (end_prefix, base) = match (first, input.as_bytes().get(1)) {
-            (b'0', Some(b'b')) => (2, IntegerBase::Binary),
-            (b'0', Some(b'o')) => (2, IntegerBase::Octal),
-            (b'0', Some(b'x')) => (2, IntegerBase::Hexadecimal),
+    /// Returns the raw input that was passed to `parse`.
+    pub fn raw_input(&self) -> &str {
+        &self.raw
+    }
 
-            // Everything else is treated as decimal. Several cases are caught
-            // by this:
-            // - "123"
-            // - "0"
-            // - "0u8"
-            // - "0r" -> this will error later
-            _ => (0, IntegerBase::Decimal),
-        };
-        let without_prefix = &input[end_prefix..];
-
-        // Find end of main part.
-        let end_main = without_prefix.bytes()
-                .position(|b| !matches!(b, b'0'..=b'9' | b'a'..=b'f' | b'A'..=b'F' | b'_'))
-                .unwrap_or(without_prefix.len());
-        let (main_part, type_suffix) = without_prefix.split_at(end_main);
-
-        // Check for invalid digits and make sure there is at least one valid digit.
-        let invalid_digit_pos = match base {
-            IntegerBase::Binary => main_part.bytes()
-                .position(|b| !matches!(b, b'0' | b'1' | b'_')),
-            IntegerBase::Octal => main_part.bytes()
-                .position(|b| !matches!(b, b'0'..=b'7' | b'_')),
-            IntegerBase::Decimal => main_part.bytes()
-                .position(|b| !matches!(b, b'0'..=b'9' | b'_')),
-            IntegerBase::Hexadecimal => None,
-        };
-
-        if let Some(pos) = invalid_digit_pos {
-            return Err(perr(end_prefix + pos, InvalidDigit));
-        }
-
-        if main_part.bytes().filter(|&b| b != b'_').count() == 0 {
-            return Err(perr(end_prefix..end_prefix + end_main, NoDigits));
-        }
-
-
-        // Parse type suffix
-        let type_suffix = match type_suffix {
-            "" => None,
-            "u8" => Some(IntegerType::U8),
-            "u16" => Some(IntegerType::U16),
-            "u32" => Some(IntegerType::U32),
-            "u64" => Some(IntegerType::U64),
-            "u128" => Some(IntegerType::U128),
-            "usize" => Some(IntegerType::Usize),
-            "i8" => Some(IntegerType::I8),
-            "i16" => Some(IntegerType::I16),
-            "i32" => Some(IntegerType::I32),
-            "i64" => Some(IntegerType::I64),
-            "i128" => Some(IntegerType::I128),
-            "isize" => Some(IntegerType::Isize),
-            _ => return Err(perr(end_main + end_prefix..input.len(), InvalidIntegerTypeSuffix)),
-        };
-
-        Ok(Self {
-            base,
-            main_part: input.cut(end_prefix..end_main + end_prefix),
-            type_suffix,
-        })
+    /// Returns the raw input that was passed to `parse`, potentially owned.
+    pub fn into_raw_input(self) -> B {
+        self.raw
     }
 }
 
@@ -201,8 +163,10 @@ impl IntegerLit<&str> {
     /// `Self`.
     pub fn to_owned(&self) -> IntegerLit<String> {
         IntegerLit {
+            raw: self.raw.to_owned(),
+            start_main_part: self.start_main_part,
+            end_main_part: self.end_main_part,
             base: self.base,
-            main_part: self.main_part.to_owned(),
             type_suffix: self.type_suffix,
         }
     }
@@ -210,22 +174,7 @@ impl IntegerLit<&str> {
 
 impl<B: Buffer> fmt::Display for IntegerLit<B> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let suffix = match self.type_suffix {
-            None => "",
-            Some(IntegerType::U8) => "u8",
-            Some(IntegerType::U16) => "u16",
-            Some(IntegerType::U32) => "u32",
-            Some(IntegerType::U64) => "u64",
-            Some(IntegerType::U128) => "u128",
-            Some(IntegerType::Usize) => "usize",
-            Some(IntegerType::I8) => "i8",
-            Some(IntegerType::I16) => "i16",
-            Some(IntegerType::I32) => "i32",
-            Some(IntegerType::I64) => "i64",
-            Some(IntegerType::I128) => "i128",
-            Some(IntegerType::Isize) => "isize",
-        };
-        write!(f, "{}{}{}", self.base.prefix(), &*self.main_part, suffix)
+        write!(f, "{}", &*self.raw)
     }
 }
 
@@ -278,6 +227,78 @@ impl_from_int_literal!(
 
 mod sealed {
     pub trait Sealed {}
+}
+
+/// Precondition: first byte of string has to be in `b'0'..=b'9'`.
+#[inline(never)]
+pub(crate) fn parse_impl(input: &str, first: u8) -> Result<IntegerLit<&str>, ParseError> {
+    // Figure out base and strip prefix base, if it exists.
+    let (end_prefix, base) = match (first, input.as_bytes().get(1)) {
+        (b'0', Some(b'b')) => (2, IntegerBase::Binary),
+        (b'0', Some(b'o')) => (2, IntegerBase::Octal),
+        (b'0', Some(b'x')) => (2, IntegerBase::Hexadecimal),
+
+        // Everything else is treated as decimal. Several cases are caught
+        // by this:
+        // - "123"
+        // - "0"
+        // - "0u8"
+        // - "0r" -> this will error later
+        _ => (0, IntegerBase::Decimal),
+    };
+    let without_prefix = &input[end_prefix..];
+
+    // Find end of main part.
+    let end_main = without_prefix.bytes()
+            .position(|b| !matches!(b, b'0'..=b'9' | b'a'..=b'f' | b'A'..=b'F' | b'_'))
+            .unwrap_or(without_prefix.len());
+    let (main_part, type_suffix) = without_prefix.split_at(end_main);
+
+    // Check for invalid digits and make sure there is at least one valid digit.
+    let invalid_digit_pos = match base {
+        IntegerBase::Binary => main_part.bytes()
+            .position(|b| !matches!(b, b'0' | b'1' | b'_')),
+        IntegerBase::Octal => main_part.bytes()
+            .position(|b| !matches!(b, b'0'..=b'7' | b'_')),
+        IntegerBase::Decimal => main_part.bytes()
+            .position(|b| !matches!(b, b'0'..=b'9' | b'_')),
+        IntegerBase::Hexadecimal => None,
+    };
+
+    if let Some(pos) = invalid_digit_pos {
+        return Err(perr(end_prefix + pos, InvalidDigit));
+    }
+
+    if main_part.bytes().filter(|&b| b != b'_').count() == 0 {
+        return Err(perr(end_prefix..end_prefix + end_main, NoDigits));
+    }
+
+
+    // Parse type suffix
+    let type_suffix = match type_suffix {
+        "" => None,
+        "u8" => Some(IntegerType::U8),
+        "u16" => Some(IntegerType::U16),
+        "u32" => Some(IntegerType::U32),
+        "u64" => Some(IntegerType::U64),
+        "u128" => Some(IntegerType::U128),
+        "usize" => Some(IntegerType::Usize),
+        "i8" => Some(IntegerType::I8),
+        "i16" => Some(IntegerType::I16),
+        "i32" => Some(IntegerType::I32),
+        "i64" => Some(IntegerType::I64),
+        "i128" => Some(IntegerType::I128),
+        "isize" => Some(IntegerType::Isize),
+        _ => return Err(perr(end_main + end_prefix..input.len(), InvalidIntegerTypeSuffix)),
+    };
+
+    Ok(IntegerLit {
+        raw: input,
+        start_main_part: end_prefix,
+        end_main_part: end_main + end_prefix,
+        base,
+        type_suffix,
+    })
 }
 
 
